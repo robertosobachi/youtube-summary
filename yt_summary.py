@@ -72,14 +72,19 @@ def video_title(vid: str) -> str:
         return vid
 
 
+def lang(code: str) -> str:
+    return code.split("-")[0].lower()
+
+
 def transcript(vid: str) -> tuple[str, str]:
     tracks = list(YouTubeTranscriptApi().list(vid))
     if not tracks:
         sys.exit("No transcript available for this video.")
-    # Prefer human-made captions over auto-generated ones.
-    track = next((t for t in tracks if not t.is_generated), tracks[0])
+    # Human captions first. Auto-generated tracks include machine dubs listed
+    # alphabetically, so the original can't be told apart: prefer English, then Italian.
+    track = min(tracks, key=lambda t: (t.is_generated, {"en": 0, "it": 1}.get(lang(t.language_code), 2)))
     text = " ".join(s.text for s in track.fetch()).replace("\n", " ")
-    return text, f"{track.language} ({track.language_code})"
+    return text, "Italian" if lang(track.language_code) == "it" else "English"
 
 
 def main() -> None:

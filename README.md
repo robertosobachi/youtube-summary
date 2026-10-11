@@ -1,6 +1,6 @@
 # yt-summary
 
-Fetches a YouTube video's transcript and summarises it with the Claude API, in the video's language.
+Fetches a YouTube video's transcript and summarises it with the Claude API, in Italian when the chosen transcript is Italian and in English otherwise.
 
 ## Setup
 
@@ -15,5 +15,6 @@ Prints the summary and copies it to the clipboard (macOS).
 
 ## Notes
 
-- Human captions are preferred, auto-generated ones used as fallback.
+- Human captions are preferred, auto-generated ones used as fallback. Within each, English comes first, then Italian.
+- Auto-generated tracks can include machine dubs, so an Italian video with only auto captions is summarised in English.
 - YouTube blocks transcript requests from cloud and VPN IPs. Run it from a residential connection.
