@@ -9,7 +9,10 @@
 """Usage: yt_summary.py <youtube-url-or-id>
 
 Needs ANTHROPIC_API_KEY in the environment.
-Prints the summary and copies it to the clipboard (macOS).
+Prints the summary and copies it to the clipboard (macOS). Saves summary and
+transcript to transcripts/<id>.md next to this script and offers to open a new
+Claude Desktop chat that reads it (needs the Filesystem extension allowed on
+that folder).
 """
 
 import json
@@ -18,12 +21,19 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 import anthropic
 from youtube_transcript_api import YouTubeTranscriptApi
 
 MODEL = "claude-sonnet-5-5"
-MAX_TOKENS = 2000
+# Thinking is always on for this model and counts towards max_tokens.
+MAX_TOKENS = 16000
+EFFORT = "low"
+OUT_DIR = Path(__file__).resolve().parent / "transcripts"
+# Section separators in the saved file, also used to read the summary back.
+SUMMARY = "## Summary\n\n"
+TRANSCRIPT = "\n\n## Transcript\n\n"
 
 PROMPT = """Summarise the YouTube transcript you receive.
 Write the whole summary, headings included, in the language given on the "Language:" line.
@@ -87,22 +97,50 @@ def transcript(vid: str) -> tuple[str, str]:
     return text, "Italian" if lang(track.language_code) == "it" else "English"
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    vid = video_id(sys.argv[1])
+def summarise(vid: str, path: Path) -> str:
     title = video_title(vid)
     text, language = transcript(vid)
 
     msg = anthropic.Anthropic().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
+        output_config={"effort": EFFORT},
         system=PROMPT,
         messages=[{"role": "user", "content": f"Title: {title}\nLanguage: {language}\n\n{text}"}],
     )
-    summary = msg.content[0].text.strip()
+    # The response starts with a thinking block; the summary is in the text blocks.
+    summary = "".join(b.text for b in msg.content if b.type == "text").strip()
+    if not summary:
+        sys.exit(f"No summary returned (stop_reason: {msg.stop_reason}).")
+    url = f"https://www.youtube.com/watch?v={vid}"
+    doc = f"# {title}\n\n{url}\n\n{SUMMARY}{summary}{TRANSCRIPT}{text}\n"
+    OUT_DIR.mkdir(exist_ok=True)
+    path.write_text(doc)
+    print(f"Saved to {path}", file=sys.stderr)
+    return summary
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    vid = video_id(sys.argv[1])
+    path = OUT_DIR / f"{vid}.md"
+    if path.exists():
+        # Already summarised: reuse the saved summary, no transcript fetch or API call.
+        summary = path.read_text().partition(SUMMARY)[2].partition(TRANSCRIPT)[0]
+        print(f"Cached in {path}", file=sys.stderr)
+    else:
+        summary = summarise(vid, path)
     print(summary)
     subprocess.run(["pbcopy"], input=summary.encode(), check=False)
+
+    # Ask only when run interactively. The chat reads the file through the
+    # Filesystem extension, which avoids the ~14,000 character limit on q.
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        print("Open in Claude Desktop? [y/N] ", end="", file=sys.stderr, flush=True)
+        if input().strip().lower() == "y":
+            prompt = f"Read {path} (summary and transcript of a YouTube video) and answer my questions about it.\n\n"
+            subprocess.run(["open", "claude://claude.ai/new?q=" + urllib.parse.quote(prompt)], check=False)
 
 
 if __name__ == "__main__":
