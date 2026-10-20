@@ -32,7 +32,7 @@ To clear the cache:
     yts feed wl         # Watch Later
     yts feed -n 50      # more items (default 20), with any feed
 
-Lists the feed, numbered, then asks which ones to summarise (`1 4 7`, Enter to quit). Videos already summarised are dimmed and marked ✅. Private and deleted videos are hidden.
+Lists the feed to pick from: ↑↓ (or `j`/`k`) to move, Space to select several, Enter to summarise the selected ones (or the highlighted one if none are selected), `q` or Esc to quit. With piped input it falls back to typing numbers (`1 4 7`). Videos already summarised are dimmed and marked ✅. Private and deleted videos are hidden.
 
 Up to two entries are marked 🌟 with a magenta title: Claude Haiku's guess at what you'd want, from the titles and channels of your last 50 summaries. It only highlights, nothing is summarised until you pick. With no saved summaries there's no guess and no API call; if the call fails, the list prints without highlights.
 

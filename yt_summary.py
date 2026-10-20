@@ -25,9 +25,13 @@ keychain password each run.
 """
 
 import json
+import os
 import re
+import select
 import subprocess
 import sys
+import termios
+import tty
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -227,33 +231,96 @@ def recommend(entries: list[dict]) -> set[str]:
     return {fresh[n - 1]["id"] for n in picks[:2]}
 
 
+def feed_line(n: int, e: dict, recs: set[str]) -> Text:
+    cached = (OUT_DIR / f"{e['id']}.md").exists()
+    rec = e["id"] in recs
+    line = Text.assemble(
+        (f"{n:>3}. ", "dim"),
+        # Both emoji are two columns wide; the blank keeps titles aligned.
+        "✅" if cached else "🌟" if rec else "  ",
+        " ",
+        (e["title"], "bold magenta" if rec else "bold"),
+        "  ",
+        (f"[{e.get('channel') or e['uploader']}]", "cyan"),
+    )
+    if cached:
+        line.stylize("dim")
+    return line
+
+
+def pick(lines: list[Text]) -> list[int]:
+    """Arrow-key picker on stderr. Returns the chosen indices, empty on quit."""
+    err = Console(stderr=True)
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    cur, top, drawn, chosen = 0, 0, 0, set()
+    # Leave room for the hint and the line the cursor ends on.
+    size = max(1, min(len(lines), err.height - 2))
+    hint = Text("↑↓ move  space select  enter summarise  q quit", style="dim")
+
+    def draw() -> None:
+        nonlocal top, drawn
+        top = min(max(top, cur - size + 1), cur)
+        if drawn:
+            err.file.write(f"\x1b[{drawn}F\x1b[J")
+        for i in range(top, top + size):
+            # One terminal line per row, or the redraw lands in the wrong place.
+            row = Text.assemble("● " if i in chosen else "  ", lines[i], no_wrap=True, overflow="ellipsis")
+            if i == cur:
+                row.stylize("reverse")
+            err.print(row)
+        err.print(hint)
+        drawn = size + 1
+
+    try:
+        tty.setcbreak(fd)
+        err.file.write("\x1b[?25l")
+        while True:
+            draw()
+            key = os.read(fd, 1)
+            # A lone Esc quits; an arrow key sends Esc followed by more bytes.
+            if key == b"\x1b" and select.select([fd], [], [], 0.05)[0]:
+                key += os.read(fd, 8)
+            if key in (b"\x1b[A", b"k"):
+                cur = max(cur - 1, 0)
+            elif key in (b"\x1b[B", b"j"):
+                cur = min(cur + 1, len(lines) - 1)
+            elif key == b" ":
+                chosen ^= {cur}
+            elif key in (b"\r", b"\n"):
+                return sorted(chosen) or [cur]
+            elif key in (b"\x1b", b"q"):
+                return []
+    except KeyboardInterrupt:
+        return []
+    finally:
+        if drawn:
+            err.file.write(f"\x1b[{drawn}F\x1b[J")
+        err.file.write("\x1b[?25h")
+        err.file.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
 def feed(args: list[str]) -> None:
     entries = feed_entries(*feed_args(args))
     if not entries:
         sys.exit("The feed is empty.")
     with Console(stderr=True).status("Picking..."):
         recs = recommend(entries)
-    out = Console()
-    for n, e in enumerate(entries, 1):
-        cached = (OUT_DIR / f"{e['id']}.md").exists()
-        rec = e["id"] in recs
-        line = Text.assemble(
-            (f"{n:>3}. ", "dim"),
-            # Both emoji are two columns wide; the blank keeps titles aligned.
-            "✅" if cached else "🌟" if rec else "  ",
-            " ",
-            (e["title"], "bold magenta" if rec else "bold"),
-            "  ",
-            (f"[{e.get('channel') or e['uploader']}]", "cyan"),
-        )
-        if cached:
-            line.stylize("dim")
-        out.print(line)
-    try:
-        picked = input("\nPick (e.g. 1 4 7, Enter to quit): ").split()
-    except EOFError:
-        return
-    picks = [entries[int(p) - 1] for p in picked if p.isdigit() and 1 <= int(p) <= len(entries)]
+    lines = [feed_line(n, e, recs) for n, e in enumerate(entries, 1)]
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        chosen = pick(lines)
+    else:
+        # Piped input: print the list and read numbers instead.
+        out = Console()
+        for line in lines:
+            out.print(line)
+        try:
+            picked = input("\nPick (e.g. 1 4 7, Enter to quit): ").split()
+        except EOFError:
+            return
+        chosen = [int(p) - 1 for p in picked if p.isdigit() and 1 <= int(p) <= len(entries)]
+    picks = [entries[i] for i in chosen]
     err = Console(stderr=True)
     for e in picks:
         err.rule(e["title"])
