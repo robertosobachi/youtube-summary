@@ -7,12 +7,14 @@
 #   "rich",
 # ]
 # ///
-"""Usage: yt_summary.py <youtube-url-or-id>
+"""Usage: yts <youtube-url-or-id>
+       yts --clear [youtube-url-or-id]
 
 Needs ANTHROPIC_API_KEY in the environment.
 Prints the summary and saves summary and transcript to transcripts/<id>.md next
 to this script. Copies a follow-up prompt with both to the clipboard (macOS),
 ready to paste into any chat.
+--clear deletes the saved file for one video, or all of them.
 """
 
 import json
@@ -125,10 +127,30 @@ def summarise(vid: str, path: Path) -> str:
     return summary
 
 
+def clear(arg: str | None) -> None:
+    if arg is None:
+        paths = list(OUT_DIR.glob("*.md"))
+        for p in paths:
+            p.unlink()
+        print(f"Removed {len(paths)} cached summaries.", file=sys.stderr)
+        return
+    vid = video_id(arg)
+    path = OUT_DIR / f"{vid}.md"
+    if path.exists():
+        path.unlink()
+        print(f"Removed {path}", file=sys.stderr)
+    else:
+        print(f"Not cached: {vid}", file=sys.stderr)
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    if args[:1] == ["--clear"] and len(args) <= 2:
+        clear(args[1] if len(args) == 2 else None)
+        return
+    if len(args) != 1:
         sys.exit(__doc__)
-    vid = video_id(sys.argv[1])
+    vid = video_id(args[0])
     path = OUT_DIR / f"{vid}.md"
     if path.exists():
         # Already summarised: reuse the saved summary, no transcript fetch or API call.

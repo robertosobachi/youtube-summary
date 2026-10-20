@@ -6,12 +6,20 @@ Fetches a YouTube video's transcript and summarises it with the Claude API, in I
 
 - [uv](https://docs.astral.sh/uv/) (`brew install uv`). Dependencies install on first run.
 - `ANTHROPIC_API_KEY` set in your shell environment. Never commit it.
+- Link it as `yts` somewhere on your PATH, once, from the repo directory:
+
+      ln -s "$PWD/yt_summary.py" ~/.local/bin/yts
 
 ## Usage
 
-    ./yt_summary.py "https://youtu.be/VIDEO_ID"
+    yts "https://youtu.be/VIDEO_ID"
 
-Prints the summary. Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call. Delete the file to summarise again.
+Prints the summary. Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call.
+
+To clear the cache:
+
+    yts --clear "https://youtu.be/VIDEO_ID"   # one video, summarised again on the next run
+    yts --clear                               # every saved summary
 
 It also copies a follow-up prompt to the clipboard (macOS): a short instruction plus the summary and full transcript. Paste it into Claude, ChatGPT or any other chat to ask questions about the video.
 
@@ -19,7 +27,7 @@ It also copies a follow-up prompt to the clipboard (macOS): a short instruction 
 
 Invented example. In a terminal the Markdown is rendered with colour.
 
-    $ ./yt_summary.py "https://youtu.be/AbCdEfGhIjK"
+    $ yts "https://youtu.be/AbCdEfGhIjK"
     Saved to ~/yt-summary/transcripts/AbCdEfGhIjK.md
     # 🍞 Why Your Sourdough Starter Dies in Summer
 
