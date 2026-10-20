@@ -10,6 +10,10 @@ Fetches a YouTube video's transcript and summarises it with the Claude API, in I
 
       ln -s "$PWD/yt_summary.py" ~/.local/bin/yts
 
+- Optional, zsh: to pass `watch?v=` URLs without quotes, add this to `~/.zshrc`. URLs with `&` (e.g. `&t=30s`) still need quotes.
+
+      alias yts='noglob yts'
+
 ## Usage
 
     yts "https://youtu.be/VIDEO_ID"
