@@ -20,9 +20,11 @@ ready to paste into any chat.
 feed lists your YouTube Home recommendations (rec, default), Subscriptions
 (subs) or Watch Later (wl) using Chrome's cookies, N items (default 20), and
 summarises the ones you pick. Up to two entries marked 🌟 are Claude's guess at
-what you'd want, based on what you summarised before. macOS asks for the
+what you'd want and the ones marked 👎 at what you wouldn't, based on what you
+summarised before and what you marked not interested with x. macOS asks for the
 keychain password each run.
---clear deletes the saved file for one video, or all of them.
+--clear deletes the saved file for one video, or all of them. It keeps the
+videos marked not interested.
 """
 
 import base64
@@ -60,6 +62,8 @@ FEED_SIZE = 20
 # Cheap model that highlights feed entries resembling what was summarised before.
 PICK_MODEL = "claude-haiku-5-5"
 PICK_HISTORY = 50
+# Feed videos marked not interested with x, as {id: "title [channel]"}, oldest first.
+REJECTED = OUT_DIR / "rejected.json"
 # Height in terminal rows of the thumbnail shown under the feed picker.
 PREVIEW_ROWS = 9
 # Thumbnail next to each feed entry: 16:9 over two rows of roughly 1:2 cells.
@@ -214,18 +218,37 @@ def history_titles() -> list[str]:
     return titles
 
 
-def recommend(entries: list[dict]) -> set[str]:
+def load_rejected() -> dict[str, str]:
+    try:
+        return json.loads(REJECTED.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_rejected(rejected: dict[str, str]) -> None:
+    OUT_DIR.mkdir(exist_ok=True)
+    REJECTED.write_text(json.dumps(rejected, indent=1, ensure_ascii=False) + "\n")
+
+
+def recommend(entries: list[dict], rejected: dict[str, str]) -> tuple[set[str], set[str]]:
+    """Haiku's guess at the fresh entries you'd want and the ones you'd skip, as ids."""
     history = history_titles()
-    fresh = [e for e in entries if not (OUT_DIR / f"{e['id']}.md").exists()]
+    fresh = [e for e in entries if not (OUT_DIR / f"{e['id']}.md").exists() and e["id"] not in rejected]
     # With no history the pick would be a guess, so don't spend a call on it.
-    if not history or not fresh:
-        return set()
+    if not (history or rejected) or not fresh:
+        return set(), set()
     listed = "\n".join(f"{n}. {e['title']} [{e.get('channel') or e['uploader']}]" for n, e in enumerate(fresh, 1))
+    passed = list(rejected.values())[::-1][:PICK_HISTORY]
     prompt = (
         "Videos I chose to summarise before, newest first:\n"
-        + "\n".join(f"- {t}" for t in history)
+        + ("\n".join(f"- {t}" for t in history) or "(none)")
+        + "\n\nVideos I marked not interested, newest first:\n"
+        + ("\n".join(f"- {t}" for t in passed) or "(none)")
         + f"\n\nNew videos:\n{listed}\n\n"
-        "Which 1 or 2 new videos am I most likely to want? Reply with their numbers only."
+        "Reply with these two lines and nothing else:\n"
+        "Want: the numbers of the 1 or 2 new videos I'm most likely to want\n"
+        "Skip: the numbers of the new videos I'd clearly not want, judging by both lists. "
+        "Leave it empty when unsure."
     )
     try:
         msg = anthropic.Anthropic().messages.create(
@@ -236,10 +259,17 @@ def recommend(entries: list[dict]) -> set[str]:
         )
     except Exception:
         # A highlight isn't worth blocking the feed for.
-        return set()
+        return set(), set()
     text = "".join(b.text for b in msg.content if b.type == "text")
-    picks = [int(n) for n in re.findall(r"\d+", text) if 1 <= int(n) <= len(fresh)]
-    return {fresh[n - 1]["id"] for n in picks[:2]}
+
+    def numbers(label: str) -> list[int]:
+        # \W* lets through Markdown such as **Want:**.
+        m = re.search(rf"{label}\W*(.*)", text, re.IGNORECASE)
+        return [int(n) for n in re.findall(r"\d+", m.group(1)) if 1 <= int(n) <= len(fresh)] if m else []
+
+    want = numbers("Want")[:2]
+    skip = [n for n in numbers("Skip") if n not in want]
+    return {fresh[n - 1]["id"] for n in want}, {fresh[n - 1]["id"] for n in skip}
 
 
 def can_draw_images() -> bool:
@@ -285,14 +315,15 @@ def kitty_delete(image_id: int) -> str:
     return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"
 
 
-def feed_item(n: int, e: dict, recs: set[str], icon: bool = False) -> list[Text]:
+def feed_item(n: int, e: dict, recs: set[str], skips: set[str], icon: bool = False) -> list[Text]:
     """The entry's rows in the list: one, or with an icon, the title over the channel
     with room on the left for the icon."""
     cached = (OUT_DIR / f"{e['id']}.md").exists()
     rec = e["id"] in recs
+    skip = e["id"] in skips
     num = (f"{n:>3}. ", "dim")
-    # Both emoji are two columns wide; the blank keeps titles aligned.
-    mark = "✅" if cached else "🌟" if rec else "  "
+    # The emoji are two columns wide; the blank keeps titles aligned.
+    mark = "✅" if cached else "🌟" if rec else "👎" if skip else "  "
     title = (e["title"], "bold magenta" if rec else "bold")
     channel = (f"[{e.get('channel') or e['uploader']}]", "cyan")
     if icon:
@@ -300,24 +331,34 @@ def feed_item(n: int, e: dict, recs: set[str], icon: bool = False) -> list[Text]
         rows = [Text.assemble(num, gap, mark, " ", title), Text.assemble(" " * 5, gap, "   ", channel)]
     else:
         rows = [Text.assemble(num, mark, " ", title, "  ", channel)]
-    if cached:
+    if cached or skip:
         for row in rows:
             row.stylize("dim")
     return rows
 
 
-def pick(items: list[list[Text]], posters: list[tuple[str, str] | None] | None = None) -> list[int]:
+def pick(
+    items: list[list[Text]], posters: list[tuple[str, str] | None] | None = None, rejected: set[int] = frozenset()
+) -> tuple[list[int], set[int]]:
     """Arrow-key picker on stderr. With posters, each entry gets its icon and the
-    highlighted one a larger preview under the list. Returns the chosen indices, empty on quit."""
+    highlighted one a larger preview under the list. Returns the chosen indices, empty on
+    quit, and the ones marked not interested, starting from rejected."""
     err = Console(stderr=True)
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     cur, top, drawn, chosen, shown = 0, 0, 0, set(), []
+    rejected = set(rejected)
     height = len(items[0])
     preview = PREVIEW_ROWS if posters else 0
     # Leave room for the hint, the line the cursor ends on and the preview.
     size = max(1, min(len(items), (err.height - 2 - preview) // height))
-    hint = Text("↑↓ move  space select  enter summarise  q quit", style="dim")
+    # One line even in a narrow window, or the redraw lands in the wrong place.
+    hint = Text(
+        "↑↓ move  space select  x not interested  enter summarise  q quit",
+        style="dim",
+        no_wrap=True,
+        overflow="ellipsis",
+    )
 
     def draw() -> None:
         nonlocal top, drawn, shown
@@ -329,7 +370,10 @@ def pick(items: list[list[Text]], posters: list[tuple[str, str] | None] | None =
         for i in range(top, top + size):
             for k, line in enumerate(items[i]):
                 # One terminal line per row, or the redraw lands in the wrong place.
-                row = Text.assemble("● " if i in chosen and k == 0 else "  ", line, no_wrap=True, overflow="ellipsis")
+                sel = "● " if i in chosen else ("✕ ", "red") if i in rejected else "  "
+                row = Text.assemble(sel if k == 0 else "  ", line, no_wrap=True, overflow="ellipsis")
+                if i in rejected:
+                    row.stylize("dim")
                 if i == cur:
                     row.stylize("reverse")
                 err.print(row)
@@ -361,12 +405,16 @@ def pick(items: list[list[Text]], posters: list[tuple[str, str] | None] | None =
                 cur = min(cur + 1, len(items) - 1)
             elif key == b" ":
                 chosen ^= {cur}
+                rejected -= chosen
+            elif key == b"x":
+                rejected ^= {cur}
+                chosen -= rejected
             elif key in (b"\r", b"\n"):
-                return sorted(chosen) or [cur]
+                return sorted(chosen) or [cur], rejected
             elif key in (b"\x1b", b"q"):
-                return []
+                return [], rejected
     except KeyboardInterrupt:
-        return []
+        return [], rejected
     finally:
         if drawn:
             err.file.write(f"\x1b[{drawn}F\x1b[J")
@@ -381,17 +429,19 @@ def feed(args: list[str]) -> None:
     if not entries:
         sys.exit("The feed is empty.")
     interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    rejected = load_rejected()
     with Console(stderr=True).status("Picking..."), ThreadPoolExecutor(8) as pool:
         # Thumbnails load while Haiku picks, so moving through the list never waits on the network.
         thumbs = pool.map(thumbnail, [e["id"] for e in entries]) if interactive and can_draw_images() else None
-        recs = recommend(entries)
+        recs, skips = recommend(entries, rejected)
         posters = list(thumbs) if thumbs else None
     # Icons and preview need room for at least three entries.
     if not any(posters or []) or Console(stderr=True).height - 2 - PREVIEW_ROWS < 3 * ICON_ROWS:
         posters = None
-    items = [feed_item(n, e, recs, icon=bool(posters)) for n, e in enumerate(entries, 1)]
+    items = [feed_item(n, e, recs, skips, icon=bool(posters)) for n, e in enumerate(entries, 1)]
+    marked = {i for i, e in enumerate(entries) if e["id"] in rejected}
     if interactive:
-        chosen = pick(items, posters)
+        chosen, marked = pick(items, posters, marked)
     else:
         # Piped input: print the list and read numbers instead.
         out = Console()
@@ -403,6 +453,16 @@ def feed(args: list[str]) -> None:
         except EOFError:
             return
         chosen = [int(p) - 1 for p in picked if p.isdigit() and 1 <= int(p) <= len(entries)]
+    # Only your own marks count: saving Haiku's skips would feed its guesses back to it.
+    # Picking a video takes it off the list.
+    before = dict(rejected)
+    for i, e in enumerate(entries):
+        if i in marked and i not in chosen:
+            rejected.setdefault(e["id"], f"{e['title']} [{e.get('channel') or e['uploader']}]")
+        else:
+            rejected.pop(e["id"], None)
+    if rejected != before:
+        save_rejected(rejected)
     picks = [entries[i] for i in chosen]
     err = Console(stderr=True)
     for e in picks:
