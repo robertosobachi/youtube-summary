@@ -11,9 +11,9 @@ Fetches a YouTube video's transcript and summarises it with the Claude API, in I
 
     ./yt_summary.py "https://youtu.be/VIDEO_ID"
 
-Prints the summary and copies it to the clipboard (macOS). Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call. Delete the file to summarise again.
+Prints the summary. Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call. Delete the file to summarise again.
 
-When run in a terminal, it then asks whether to open a new Claude Desktop chat. Answer `y` and the chat opens with a prompt asking Claude to read that file. This needs the Filesystem extension in Claude Desktop (Settings > Extensions) with the `transcripts/` folder allowed.
+It also copies a follow-up prompt to the clipboard (macOS): a short instruction plus the summary and full transcript. Paste it into Claude, ChatGPT or any other chat to ask questions about the video.
 
 ## Notes
 

@@ -4,15 +4,15 @@
 # dependencies = [
 #   "youtube-transcript-api>=1.2",
 #   "anthropic",
+#   "rich",
 # ]
 # ///
 """Usage: yt_summary.py <youtube-url-or-id>
 
 Needs ANTHROPIC_API_KEY in the environment.
-Prints the summary and copies it to the clipboard (macOS). Saves summary and
-transcript to transcripts/<id>.md next to this script and offers to open a new
-Claude Desktop chat that reads it (needs the Filesystem extension allowed on
-that folder).
+Prints the summary and saves summary and transcript to transcripts/<id>.md next
+to this script. Copies a follow-up prompt with both to the clipboard (macOS),
+ready to paste into any chat.
 """
 
 import json
@@ -24,6 +24,8 @@ import urllib.request
 from pathlib import Path
 
 import anthropic
+from rich.console import Console
+from rich.markdown import Markdown
 from youtube_transcript_api import TranscriptsDisabled, YouTubeTranscriptApi
 
 MODEL = "claude-sonnet-5-5"
@@ -134,16 +136,15 @@ def main() -> None:
         print(f"Cached in {path}", file=sys.stderr)
     else:
         summary = summarise(vid, path)
-    print(summary)
-    subprocess.run(["pbcopy"], input=summary.encode(), check=False)
-
-    # Ask only when run interactively. The chat reads the file through the
-    # Filesystem extension, which avoids the ~14,000 character limit on q.
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        print("Open in Claude Desktop? [y/N] ", end="", file=sys.stderr, flush=True)
-        if input().strip().lower() == "y":
-            prompt = f"Read {path} (summary and transcript of a YouTube video) and answer my questions about it.\n\n"
-            subprocess.run(["open", "claude://claude.ai/new?q=" + urllib.parse.quote(prompt)], check=False)
+    # Rich drops the colours when stdout isn't a terminal.
+    Console().print(Markdown(summary))
+    # Self-contained so it can be pasted into any chat, not only one with file access.
+    followup = "Below are the summary and transcript of a YouTube video. Answer my questions about it.\n\n" + path.read_text()
+    subprocess.run(["pbcopy"], input=followup.encode(), check=False)
+    err = Console(stderr=True)
+    err.print()
+    err.rule(style="dim")
+    err.print("Follow-up prompt (summary and transcript) copied to the clipboard.", style="dim")
 
 
 if __name__ == "__main__":
