@@ -32,7 +32,7 @@ To clear the cache:
     yts feed wl         # Watch Later
     yts feed -n 50      # more items (default 20), with any feed
 
-Lists the feed to pick from: ↑↓ (or `j`/`k`) to move, Space to select several, Enter to summarise the selected ones (or the highlighted one if none are selected), `q` or Esc to quit. With piped input it falls back to typing numbers (`1 4 7`). Videos already summarised are dimmed and marked ✅. Private and deleted videos are hidden.
+Lists the feed to pick from: ↑↓ (or `j`/`k`) to move, Space to select several, Enter to summarise the selected ones (or the highlighted one if none are selected), `q` or Esc to quit. In terminals that support the Kitty graphics protocol (Warp, Ghostty, kitty) each entry gets a small thumbnail with the channel under the title, and the highlighted one a larger thumbnail under the list; elsewhere, or in a window under 17 rows, it's one line per entry with no thumbnails. With piped input it falls back to typing numbers (`1 4 7`). Videos already summarised are dimmed and marked ✅. Private and deleted videos are hidden.
 
 Up to two entries are marked 🌟 with a magenta title: Claude Haiku's guess at what you'd want, from the titles and channels of your last 50 summaries. It only highlights, nothing is summarised until you pick. With no saved summaries there's no guess and no API call; if the call fails, the list prints without highlights.
 

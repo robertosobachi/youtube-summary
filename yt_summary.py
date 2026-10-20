@@ -6,6 +6,7 @@
 #   "anthropic",
 #   "rich",
 #   "yt-dlp",
+#   "pillow",
 # ]
 # ///
 """Usage: yts <youtube-url-or-id>
@@ -24,6 +25,8 @@ keychain password each run.
 --clear deletes the saved file for one video, or all of them.
 """
 
+import base64
+import io
 import json
 import os
 import re
@@ -34,6 +37,7 @@ import termios
 import tty
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import anthropic
@@ -56,6 +60,13 @@ FEED_SIZE = 20
 # Cheap model that highlights feed entries resembling what was summarised before.
 PICK_MODEL = "claude-haiku-5-5"
 PICK_HISTORY = 50
+# Height in terminal rows of the thumbnail shown under the feed picker.
+PREVIEW_ROWS = 9
+# Thumbnail next to each feed entry: 16:9 over two rows of roughly 1:2 cells.
+ICON_ROWS, ICON_COLS = 2, 7
+ICON_PX = (128, 72)
+# Column the icon starts at, after the selection mark and the number.
+ICON_AT = 8
 
 PROMPT = """Summarise the YouTube transcript you receive.
 Write the whole summary, headings included, in the language given on the "Language:" line.
@@ -231,46 +242,109 @@ def recommend(entries: list[dict]) -> set[str]:
     return {fresh[n - 1]["id"] for n in picks[:2]}
 
 
-def feed_line(n: int, e: dict, recs: set[str]) -> Text:
+def can_draw_images() -> bool:
+    # Terminals that speak the Kitty graphics protocol. Warp has no iTerm2 inline images.
+    return (
+        os.environ.get("TERM_PROGRAM") in ("WarpTerminal", "ghostty")
+        or os.environ.get("TERM") == "xterm-kitty"
+        or "KITTY_WINDOW_ID" in os.environ
+    )
+
+
+def thumbnail(vid: str) -> tuple[str, str] | None:
+    """The video's thumbnail as base64 PNG, which is all Kitty's f=100 takes:
+    full size for the preview and shrunk for the icon, so redraws stay light."""
+    from PIL import Image
+
+    def b64(img: Image.Image) -> str:
+        png = io.BytesIO()
+        img.save(png, "PNG")
+        return base64.b64encode(png.getvalue()).decode()
+
+    try:
+        with urllib.request.urlopen(f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg", timeout=5) as r:
+            img = Image.open(io.BytesIO(r.read()))
+            img.load()
+    except Exception:
+        # A missing thumbnail isn't worth blocking the feed for.
+        return None
+    return b64(img), b64(img.resize(ICON_PX))
+
+
+def kitty_image(data: str, image_id: int, rows: int, cols: int | None = None) -> str:
+    """Escape that draws an image at the cursor without moving it, sent in 4096-byte chunks."""
+    chunks = [data[i : i + 4096] for i in range(0, len(data), 4096)]
+    # With only the height set, the width keeps the aspect ratio.
+    head = f"a=T,f=100,i={image_id},r={rows},{f'c={cols},' if cols else ''}C=1,q=2,"
+    return "".join(
+        f"\x1b_G{head if n == 0 else ''}m={int(n < len(chunks) - 1)};{c}\x1b\\" for n, c in enumerate(chunks)
+    )
+
+
+def kitty_delete(image_id: int) -> str:
+    return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"
+
+
+def feed_item(n: int, e: dict, recs: set[str], icon: bool = False) -> list[Text]:
+    """The entry's rows in the list: one, or with an icon, the title over the channel
+    with room on the left for the icon."""
     cached = (OUT_DIR / f"{e['id']}.md").exists()
     rec = e["id"] in recs
-    line = Text.assemble(
-        (f"{n:>3}. ", "dim"),
-        # Both emoji are two columns wide; the blank keeps titles aligned.
-        "✅" if cached else "🌟" if rec else "  ",
-        " ",
-        (e["title"], "bold magenta" if rec else "bold"),
-        "  ",
-        (f"[{e.get('channel') or e['uploader']}]", "cyan"),
-    )
+    num = (f"{n:>3}. ", "dim")
+    # Both emoji are two columns wide; the blank keeps titles aligned.
+    mark = "✅" if cached else "🌟" if rec else "  "
+    title = (e["title"], "bold magenta" if rec else "bold")
+    channel = (f"[{e.get('channel') or e['uploader']}]", "cyan")
+    if icon:
+        gap = " " * (ICON_COLS + 1)
+        rows = [Text.assemble(num, gap, mark, " ", title), Text.assemble(" " * 5, gap, "   ", channel)]
+    else:
+        rows = [Text.assemble(num, mark, " ", title, "  ", channel)]
     if cached:
-        line.stylize("dim")
-    return line
+        for row in rows:
+            row.stylize("dim")
+    return rows
 
 
-def pick(lines: list[Text]) -> list[int]:
-    """Arrow-key picker on stderr. Returns the chosen indices, empty on quit."""
+def pick(items: list[list[Text]], posters: list[tuple[str, str] | None] | None = None) -> list[int]:
+    """Arrow-key picker on stderr. With posters, each entry gets its icon and the
+    highlighted one a larger preview under the list. Returns the chosen indices, empty on quit."""
     err = Console(stderr=True)
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
-    cur, top, drawn, chosen = 0, 0, 0, set()
-    # Leave room for the hint and the line the cursor ends on.
-    size = max(1, min(len(lines), err.height - 2))
+    cur, top, drawn, chosen, shown = 0, 0, 0, set(), []
+    height = len(items[0])
+    preview = PREVIEW_ROWS if posters else 0
+    # Leave room for the hint, the line the cursor ends on and the preview.
+    size = max(1, min(len(items), (err.height - 2 - preview) // height))
     hint = Text("↑↓ move  space select  enter summarise  q quit", style="dim")
 
     def draw() -> None:
-        nonlocal top, drawn
+        nonlocal top, drawn, shown
         top = min(max(top, cur - size + 1), cur)
         if drawn:
             err.file.write(f"\x1b[{drawn}F\x1b[J")
+        err.file.write("".join(kitty_delete(i) for i in shown))
+        shown = []
         for i in range(top, top + size):
-            # One terminal line per row, or the redraw lands in the wrong place.
-            row = Text.assemble("● " if i in chosen else "  ", lines[i], no_wrap=True, overflow="ellipsis")
-            if i == cur:
-                row.stylize("reverse")
-            err.print(row)
+            for k, line in enumerate(items[i]):
+                # One terminal line per row, or the redraw lands in the wrong place.
+                row = Text.assemble("● " if i in chosen and k == 0 else "  ", line, no_wrap=True, overflow="ellipsis")
+                if i == cur:
+                    row.stylize("reverse")
+                err.print(row)
+            if posters and posters[i]:
+                # Back up to the entry's first row, draw the icon in the gap, come back down.
+                icon = kitty_image(posters[i][1], i + 2, height, ICON_COLS)
+                err.file.write(f"\x1b[{height}A\x1b[{ICON_AT}G{icon}\x1b[{height}B\r")
+                shown.append(i + 2)
+        if posters:
+            if posters[cur]:
+                err.file.write(kitty_image(posters[cur][0], 1, PREVIEW_ROWS))
+                shown.append(1)
+            err.file.write("\n" * preview)
         err.print(hint)
-        drawn = size + 1
+        drawn = size * height + 1 + preview
 
     try:
         tty.setcbreak(fd)
@@ -284,7 +358,7 @@ def pick(lines: list[Text]) -> list[int]:
             if key in (b"\x1b[A", b"k"):
                 cur = max(cur - 1, 0)
             elif key in (b"\x1b[B", b"j"):
-                cur = min(cur + 1, len(lines) - 1)
+                cur = min(cur + 1, len(items) - 1)
             elif key == b" ":
                 chosen ^= {cur}
             elif key in (b"\r", b"\n"):
@@ -296,6 +370,7 @@ def pick(lines: list[Text]) -> list[int]:
     finally:
         if drawn:
             err.file.write(f"\x1b[{drawn}F\x1b[J")
+        err.file.write("".join(kitty_delete(i) for i in shown))
         err.file.write("\x1b[?25h")
         err.file.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -305,16 +380,24 @@ def feed(args: list[str]) -> None:
     entries = feed_entries(*feed_args(args))
     if not entries:
         sys.exit("The feed is empty.")
-    with Console(stderr=True).status("Picking..."):
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+    with Console(stderr=True).status("Picking..."), ThreadPoolExecutor(8) as pool:
+        # Thumbnails load while Haiku picks, so moving through the list never waits on the network.
+        thumbs = pool.map(thumbnail, [e["id"] for e in entries]) if interactive and can_draw_images() else None
         recs = recommend(entries)
-    lines = [feed_line(n, e, recs) for n, e in enumerate(entries, 1)]
-    if sys.stdin.isatty() and sys.stderr.isatty():
-        chosen = pick(lines)
+        posters = list(thumbs) if thumbs else None
+    # Icons and preview need room for at least three entries.
+    if not any(posters or []) or Console(stderr=True).height - 2 - PREVIEW_ROWS < 3 * ICON_ROWS:
+        posters = None
+    items = [feed_item(n, e, recs, icon=bool(posters)) for n, e in enumerate(entries, 1)]
+    if interactive:
+        chosen = pick(items, posters)
     else:
         # Piped input: print the list and read numbers instead.
         out = Console()
-        for line in lines:
-            out.print(line)
+        for item in items:
+            for line in item:
+                out.print(line)
         try:
             picked = input("\nPick (e.g. 1 4 7, Enter to quit): ").split()
         except EOFError:
