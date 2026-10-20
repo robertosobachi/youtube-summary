@@ -192,9 +192,17 @@ def feed(args: list[str]) -> None:
     out = Console()
     for n, e in enumerate(entries, 1):
         cached = (OUT_DIR / f"{e['id']}.md").exists()
-        mark = "*" if cached else " "
-        line = f"{n:>3}. {mark} {e['title']}  [{e.get('channel') or e['uploader']}]"
-        out.print(Text(line, style="dim" if cached else ""))
+        line = Text.assemble(
+            (f"{n:>3}. ", "dim"),
+            ("*" if cached else " ", "green"),
+            " ",
+            (e["title"], "bold"),
+            "  ",
+            (f"[{e.get('channel') or e['uploader']}]", "cyan"),
+        )
+        if cached:
+            line.stylize("dim")
+        out.print(line)
     try:
         picked = input("\nPick (e.g. 1 4 7, Enter to quit): ").split()
     except EOFError:
