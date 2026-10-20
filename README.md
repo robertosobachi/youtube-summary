@@ -18,7 +18,7 @@ Fetches a YouTube video's transcript and summarises it with the Claude API, in I
 
     yts "https://youtu.be/VIDEO_ID"
 
-Prints the summary. Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call.
+Prints the summary. Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call. A new summary also adds the video to your YouTube watch history, so YouTube recommends it less; this reads your login from Chrome's cookies, so macOS asks for the keychain password (see Feed).
 
 To clear the cache:
 
@@ -32,7 +32,7 @@ To clear the cache:
     yts feed wl         # Watch Later
     yts feed -n 50      # more items (default 20), with any feed
 
-Lists the feed to pick from: ↑↓ (or `j`/`k`) to move, Space to select several, `x` to mark one not interested (again to undo), Enter to summarise the selected ones (or the highlighted one if none are selected), `q` or Esc to quit. In terminals that support the Kitty graphics protocol (Warp, Ghostty, kitty) each entry gets a small thumbnail with the channel under the title, and the highlighted one a larger thumbnail under the list; elsewhere, or in a window under 17 rows, it's one line per entry with no thumbnails. With piped input it falls back to typing numbers (`1 4 7`). Videos already summarised are dimmed and marked ✅. Private and deleted videos are hidden.
+Lists the feed to pick from: ↑↓ (or `j`/`k`) to move, Space to select several, `x` to mark one not interested (again to undo), Enter to summarise the selected ones (or the highlighted one if none are selected), `q` or Esc to quit. In terminals that support the Kitty graphics protocol (Warp, Ghostty, kitty) each entry gets a small thumbnail with the channel under the title, and the highlighted one a larger thumbnail under the list; elsewhere, or in a window under 17 rows, it's one line per entry with no thumbnails. With piped input it falls back to typing numbers (`1 4 7`). Videos already summarised are left out, and more are fetched to keep the list at N. Private and deleted videos are hidden.
 
 Up to two entries are marked 🌟 with a magenta title: Claude Haiku's guess at what you'd want. Entries it thinks you'd skip are dimmed and marked 👎. Both come from the titles and channels of your last 50 summaries and your last 50 videos marked not interested, so the guesses sharpen the more you summarise and press `x`. It only highlights, nothing is summarised or hidden until you act. With no summaries and no rejections there's no guess and no API call; if the call fails, the list prints without highlights.
 

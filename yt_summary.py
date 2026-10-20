@@ -16,13 +16,13 @@
 Needs ANTHROPIC_API_KEY in the environment.
 Prints the summary and saves summary and transcript to transcripts/<id>.md next
 to this script. Copies a follow-up prompt with both to the clipboard (macOS),
-ready to paste into any chat.
+ready to paste into any chat. A new summary also marks the video watched on
+YouTube, using Chrome's cookies; macOS asks for the keychain password each run.
 feed lists your YouTube Home recommendations (rec, default), Subscriptions
-(subs) or Watch Later (wl) using Chrome's cookies, N items (default 20), and
-summarises the ones you pick. Up to two entries marked 🌟 are Claude's guess at
-what you'd want and the ones marked 👎 at what you wouldn't, based on what you
-summarised before and what you marked not interested with x. macOS asks for the
-keychain password each run.
+(subs) or Watch Later (wl), N items (default 20), and summarises the ones you
+pick. Videos already summarised are left out. Up to two entries marked 🌟 are
+Claude's guess at what you'd want and the ones marked 👎 at what you wouldn't,
+based on what you summarised before and what you marked not interested with x.
 --clear deletes the saved file for one video, or all of them. It keeps the
 videos marked not interested.
 """
@@ -188,7 +188,9 @@ def feed_args(args: list[str]) -> tuple[str, int]:
     return name, size
 
 
-def feed_entries(name: str, size: int) -> list[dict]:
+def youtube(size: int | None = None):
+    """A logged-in yt-dlp for the feed and for marking videos watched. One per run, so
+    macOS asks for the keychain password once."""
     # Imported here so plain `yts <url>` doesn't pay for loading yt-dlp.
     import yt_dlp
 
@@ -196,17 +198,34 @@ def feed_entries(name: str, size: int) -> list[dict]:
         "cookiesfrombrowser": BROWSER,
         "extract_flat": "in_playlist",
         "playlistend": size,
+        "mark_watched": True,
         "quiet": True,
         "no_warnings": True,
     }
+    return yt_dlp.YoutubeDL(opts)
+
+
+def feed_entries(ydl, name: str) -> list[dict]:
+    import yt_dlp
+
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(FEEDS[name], download=False)
+        info = ydl.extract_info(FEEDS[name], download=False)
     except yt_dlp.utils.DownloadError:
         # yt-dlp has already printed the reason.
         sys.exit("Couldn't load the feed.")
     # Private and deleted videos come back with no channel.
     return [e for e in info.get("entries") or [] if e.get("channel") or e.get("uploader")]
+
+
+def mark_watched(ydl, vid: str) -> None:
+    """Add the video to your YouTube watch history, so YouTube pushes it less."""
+    try:
+        # The watch is recorded during extraction; process=False skips format
+        # selection, which can fail afterwards when yt-dlp can't solve YouTube's challenge.
+        ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False, process=False)
+    except Exception:
+        # yt-dlp has already printed the reason; the summary is what matters.
+        Console(stderr=True).print("Couldn't mark it watched on YouTube.", style="dim")
 
 
 def history_titles() -> list[str]:
@@ -233,7 +252,7 @@ def save_rejected(rejected: dict[str, str]) -> None:
 def recommend(entries: list[dict], rejected: dict[str, str]) -> tuple[set[str], set[str]]:
     """Haiku's guess at the fresh entries you'd want and the ones you'd skip, as ids."""
     history = history_titles()
-    fresh = [e for e in entries if not (OUT_DIR / f"{e['id']}.md").exists() and e["id"] not in rejected]
+    fresh = [e for e in entries if e["id"] not in rejected]
     # With no history the pick would be a guess, so don't spend a call on it.
     if not (history or rejected) or not fresh:
         return set(), set()
@@ -318,12 +337,11 @@ def kitty_delete(image_id: int) -> str:
 def feed_item(n: int, e: dict, recs: set[str], skips: set[str], icon: bool = False) -> list[Text]:
     """The entry's rows in the list: one, or with an icon, the title over the channel
     with room on the left for the icon."""
-    cached = (OUT_DIR / f"{e['id']}.md").exists()
     rec = e["id"] in recs
     skip = e["id"] in skips
     num = (f"{n:>3}. ", "dim")
     # The emoji are two columns wide; the blank keeps titles aligned.
-    mark = "✅" if cached else "🌟" if rec else "👎" if skip else "  "
+    mark = "🌟" if rec else "👎" if skip else "  "
     title = (e["title"], "bold magenta" if rec else "bold")
     channel = (f"[{e.get('channel') or e['uploader']}]", "cyan")
     if icon:
@@ -331,7 +349,7 @@ def feed_item(n: int, e: dict, recs: set[str], skips: set[str], icon: bool = Fal
         rows = [Text.assemble(num, gap, mark, " ", title), Text.assemble(" " * 5, gap, "   ", channel)]
     else:
         rows = [Text.assemble(num, mark, " ", title, "  ", channel)]
-    if cached or skip:
+    if skip:
         for row in rows:
             row.stylize("dim")
     return rows
@@ -425,9 +443,12 @@ def pick(
 
 
 def feed(args: list[str]) -> None:
-    entries = feed_entries(*feed_args(args))
+    name, size = feed_args(args)
+    # Summarised videos are hidden, so fetch twice as many to still fill the list.
+    ydl = youtube(size * 2)
+    entries = [e for e in feed_entries(ydl, name) if not (OUT_DIR / f"{e['id']}.md").exists()][:size]
     if not entries:
-        sys.exit("The feed is empty.")
+        sys.exit("Nothing in the feed you haven't summarised.")
     interactive = sys.stdin.isatty() and sys.stderr.isatty()
     rejected = load_rejected()
     with Console(stderr=True).status("Picking..."), ThreadPoolExecutor(8) as pool:
@@ -468,7 +489,7 @@ def feed(args: list[str]) -> None:
     for e in picks:
         err.rule(e["title"])
         try:
-            show(e["id"], copy=len(picks) == 1)
+            show(e["id"], copy=len(picks) == 1, ydl=ydl)
         except SystemExit as x:
             # summarise() exits on videos without captions; carry on with the rest.
             err.print(str(x.code), style="red")
@@ -478,9 +499,10 @@ def feed(args: list[str]) -> None:
         err.print("\nSeveral videos picked, so nothing copied. `yts <id>` copies the follow-up prompt for one.", style="dim")
 
 
-def show(vid: str, copy: bool = True) -> None:
+def show(vid: str, copy: bool = True, ydl=None) -> None:
     path = OUT_DIR / f"{vid}.md"
-    if path.exists():
+    cached = path.exists()
+    if cached:
         # Already summarised: reuse the saved summary, no transcript fetch or API call.
         summary = path.read_text().partition(SUMMARY)[2].partition(TRANSCRIPT)[0]
         print(f"Cached in {path}", file=sys.stderr)
@@ -488,6 +510,9 @@ def show(vid: str, copy: bool = True) -> None:
         summary = summarise(vid, path)
     # Rich drops the colours when stdout isn't a terminal.
     Console().print(Markdown(summary))
+    if not cached:
+        with Console(stderr=True).status("Marking watched on YouTube..."):
+            mark_watched(ydl or youtube(), vid)
     if not copy:
         return
     # Self-contained so it can be pasted into any chat, not only one with file access.
