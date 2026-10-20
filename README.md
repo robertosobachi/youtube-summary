@@ -28,7 +28,9 @@ To clear the cache:
     yts feed wl         # Watch Later
     yts feed -n 50      # more items (default 20), with any feed
 
-Lists the feed, numbered, then asks which ones to summarise (`1 4 7`, Enter to quit). Videos already summarised are dimmed and marked `*`. Private and deleted videos are hidden.
+Lists the feed, numbered, then asks which ones to summarise (`1 4 7`, Enter to quit). Videos already summarised are dimmed and marked ✅. Private and deleted videos are hidden.
+
+Up to two entries are marked 🌟 with a magenta title: Claude Haiku's guess at what you'd want, from the titles and channels of your last 50 summaries. It only highlights, nothing is summarised until you pick. With no saved summaries there's no guess and no API call; if the call fails, the list prints without highlights.
 
 It reads your YouTube login from Chrome's cookies via yt-dlp, so macOS asks for the "Chrome Safe Storage" keychain password on every run. Click Allow, not Always Allow: that would let any process on the machine decrypt every Chrome cookie without asking. The feeds use YouTube's internal pages, not the official API, and can break when YouTube changes them; uv picks up a newer yt-dlp once it has a fix.
 

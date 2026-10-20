@@ -18,7 +18,9 @@ to this script. Copies a follow-up prompt with both to the clipboard (macOS),
 ready to paste into any chat.
 feed lists your YouTube Home recommendations (rec, default), Subscriptions
 (subs) or Watch Later (wl) using Chrome's cookies, N items (default 20), and
-summarises the ones you pick. macOS asks for the keychain password each run.
+summarises the ones you pick. Up to two entries marked 🌟 are Claude's guess at
+what you'd want, based on what you summarised before. macOS asks for the
+keychain password each run.
 --clear deletes the saved file for one video, or all of them.
 """
 
@@ -47,6 +49,9 @@ TRANSCRIPT = "\n\n## Transcript\n\n"
 FEEDS = {"rec": ":ytrec", "subs": ":ytsubs", "wl": ":ytwatchlater"}
 BROWSER = ("chrome",)
 FEED_SIZE = 20
+# Cheap model that highlights feed entries resembling what was summarised before.
+PICK_MODEL = "claude-haiku-5-5"
+PICK_HISTORY = 50
 
 PROMPT = """Summarise the YouTube transcript you receive.
 Write the whole summary, headings included, in the language given on the "Language:" line.
@@ -185,18 +190,59 @@ def feed_entries(name: str, size: int) -> list[dict]:
     return [e for e in info.get("entries") or [] if e.get("channel") or e.get("uploader")]
 
 
+def history_titles() -> list[str]:
+    paths = sorted(OUT_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    titles = []
+    for p in paths[:PICK_HISTORY]:
+        with p.open() as f:
+            titles.append(f.readline().removeprefix("# ").strip())
+    return titles
+
+
+def recommend(entries: list[dict]) -> set[str]:
+    history = history_titles()
+    fresh = [e for e in entries if not (OUT_DIR / f"{e['id']}.md").exists()]
+    # With no history the pick would be a guess, so don't spend a call on it.
+    if not history or not fresh:
+        return set()
+    listed = "\n".join(f"{n}. {e['title']} [{e.get('channel') or e['uploader']}]" for n, e in enumerate(fresh, 1))
+    prompt = (
+        "Videos I chose to summarise before, newest first:\n"
+        + "\n".join(f"- {t}" for t in history)
+        + f"\n\nNew videos:\n{listed}\n\n"
+        "Which 1 or 2 new videos am I most likely to want? Reply with their numbers only."
+    )
+    try:
+        msg = anthropic.Anthropic().messages.create(
+            model=PICK_MODEL,
+            max_tokens=4000,
+            output_config={"effort": "low"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception:
+        # A highlight isn't worth blocking the feed for.
+        return set()
+    text = "".join(b.text for b in msg.content if b.type == "text")
+    picks = [int(n) for n in re.findall(r"\d+", text) if 1 <= int(n) <= len(fresh)]
+    return {fresh[n - 1]["id"] for n in picks[:2]}
+
+
 def feed(args: list[str]) -> None:
     entries = feed_entries(*feed_args(args))
     if not entries:
         sys.exit("The feed is empty.")
+    with Console(stderr=True).status("Picking..."):
+        recs = recommend(entries)
     out = Console()
     for n, e in enumerate(entries, 1):
         cached = (OUT_DIR / f"{e['id']}.md").exists()
+        rec = e["id"] in recs
         line = Text.assemble(
             (f"{n:>3}. ", "dim"),
-            ("*" if cached else " ", "green"),
+            # Both emoji are two columns wide; the blank keeps titles aligned.
+            "✅" if cached else "🌟" if rec else "  ",
             " ",
-            (e["title"], "bold"),
+            (e["title"], "bold magenta" if rec else "bold"),
             "  ",
             (f"[{e.get('channel') or e['uploader']}]", "cyan"),
         )
