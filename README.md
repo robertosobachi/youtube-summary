@@ -21,6 +21,21 @@ To clear the cache:
     yts --clear "https://youtu.be/VIDEO_ID"   # one video, summarised again on the next run
     yts --clear                               # every saved summary
 
+### Feed
+
+    yts feed            # YouTube Home recommendations
+    yts feed subs       # Subscriptions
+    yts feed wl         # Watch Later
+    yts feed -n 50      # more items (default 20), with any feed
+
+Lists the feed, numbered, then asks which ones to summarise (`1 4 7`, Enter to quit). Videos already summarised are dimmed and marked `*`. Private and deleted videos are hidden.
+
+It reads your YouTube login from Chrome's cookies via yt-dlp, so macOS asks for the "Chrome Safe Storage" keychain password on every run. Click Allow, not Always Allow: that would let any process on the machine decrypt every Chrome cookie without asking. The feeds use YouTube's internal pages, not the official API, and can break when YouTube changes them; uv picks up a newer yt-dlp once it has a fix.
+
+The follow-up prompt below is copied only when you pick a single video.
+
+### Follow-up prompt
+
 It also copies a follow-up prompt to the clipboard (macOS): a short instruction plus the summary and full transcript. Paste it into Claude, ChatGPT or any other chat to ask questions about the video.
 
 ## Sample output

@@ -5,15 +5,20 @@
 #   "youtube-transcript-api>=1.2",
 #   "anthropic",
 #   "rich",
+#   "yt-dlp",
 # ]
 # ///
 """Usage: yts <youtube-url-or-id>
+       yts feed [rec|subs|wl] [-n N]
        yts --clear [youtube-url-or-id]
 
 Needs ANTHROPIC_API_KEY in the environment.
 Prints the summary and saves summary and transcript to transcripts/<id>.md next
 to this script. Copies a follow-up prompt with both to the clipboard (macOS),
 ready to paste into any chat.
+feed lists your YouTube Home recommendations (rec, default), Subscriptions
+(subs) or Watch Later (wl) using Chrome's cookies, N items (default 20), and
+summarises the ones you pick. macOS asks for the keychain password each run.
 --clear deletes the saved file for one video, or all of them.
 """
 
@@ -28,6 +33,7 @@ from pathlib import Path
 import anthropic
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.text import Text
 from youtube_transcript_api import TranscriptsDisabled, YouTubeTranscriptApi
 
 MODEL = "claude-sonnet-5-5"
@@ -38,6 +44,9 @@ OUT_DIR = Path(__file__).resolve().parent / "transcripts"
 # Section separators in the saved file, also used to read the summary back.
 SUMMARY = "## Summary\n\n"
 TRANSCRIPT = "\n\n## Transcript\n\n"
+FEEDS = {"rec": ":ytrec", "subs": ":ytsubs", "wl": ":ytwatchlater"}
+BROWSER = ("chrome",)
+FEED_SIZE = 20
 
 PROMPT = """Summarise the YouTube transcript you receive.
 Write the whole summary, headings included, in the language given on the "Language:" line.
@@ -143,14 +152,69 @@ def clear(arg: str | None) -> None:
         print(f"Not cached: {vid}", file=sys.stderr)
 
 
-def main() -> None:
-    args = sys.argv[1:]
-    if args[:1] == ["--clear"] and len(args) <= 2:
-        clear(args[1] if len(args) == 2 else None)
+def feed_args(args: list[str]) -> tuple[str, int]:
+    name, size = "rec", FEED_SIZE
+    while args:
+        if args[0] in FEEDS:
+            name, args = args[0], args[1:]
+        elif args[0] == "-n" and len(args) > 1 and args[1].isdigit() and int(args[1]) > 0:
+            size, args = int(args[1]), args[2:]
+        else:
+            sys.exit(__doc__)
+    return name, size
+
+
+def feed_entries(name: str, size: int) -> list[dict]:
+    # Imported here so plain `yts <url>` doesn't pay for loading yt-dlp.
+    import yt_dlp
+
+    opts = {
+        "cookiesfrombrowser": BROWSER,
+        "extract_flat": "in_playlist",
+        "playlistend": size,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(FEEDS[name], download=False)
+    except yt_dlp.utils.DownloadError:
+        # yt-dlp has already printed the reason.
+        sys.exit("Couldn't load the feed.")
+    # Private and deleted videos come back with no channel.
+    return [e for e in info.get("entries") or [] if e.get("channel") or e.get("uploader")]
+
+
+def feed(args: list[str]) -> None:
+    entries = feed_entries(*feed_args(args))
+    if not entries:
+        sys.exit("The feed is empty.")
+    out = Console()
+    for n, e in enumerate(entries, 1):
+        cached = (OUT_DIR / f"{e['id']}.md").exists()
+        mark = "*" if cached else " "
+        line = f"{n:>3}. {mark} {e['title']}  [{e.get('channel') or e['uploader']}]"
+        out.print(Text(line, style="dim" if cached else ""))
+    try:
+        picked = input("\nPick (e.g. 1 4 7, Enter to quit): ").split()
+    except EOFError:
         return
-    if len(args) != 1:
-        sys.exit(__doc__)
-    vid = video_id(args[0])
+    picks = [entries[int(p) - 1] for p in picked if p.isdigit() and 1 <= int(p) <= len(entries)]
+    err = Console(stderr=True)
+    for e in picks:
+        err.rule(e["title"])
+        try:
+            show(e["id"], copy=len(picks) == 1)
+        except SystemExit as x:
+            # summarise() exits on videos without captions; carry on with the rest.
+            err.print(str(x.code), style="red")
+        except Exception as x:
+            err.print(f"Failed: {x}", style="red")
+    if len(picks) > 1:
+        err.print("\nSeveral videos picked, so nothing copied. `yts <id>` copies the follow-up prompt for one.", style="dim")
+
+
+def show(vid: str, copy: bool = True) -> None:
     path = OUT_DIR / f"{vid}.md"
     if path.exists():
         # Already summarised: reuse the saved summary, no transcript fetch or API call.
@@ -160,6 +224,8 @@ def main() -> None:
         summary = summarise(vid, path)
     # Rich drops the colours when stdout isn't a terminal.
     Console().print(Markdown(summary))
+    if not copy:
+        return
     # Self-contained so it can be pasted into any chat, not only one with file access.
     followup = "Below are the summary and transcript of a YouTube video. Answer my questions about it.\n\n" + path.read_text()
     subprocess.run(["pbcopy"], input=followup.encode(), check=False)
@@ -167,6 +233,19 @@ def main() -> None:
     err.print()
     err.rule(style="dim")
     err.print("Follow-up prompt (summary and transcript) copied to the clipboard.", style="dim")
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if args[:1] == ["--clear"] and len(args) <= 2:
+        clear(args[1] if len(args) == 2 else None)
+        return
+    if args[:1] == ["feed"]:
+        feed(args[1:])
+        return
+    if len(args) != 1:
+        sys.exit(__doc__)
+    show(video_id(args[0]))
 
 
 if __name__ == "__main__":
