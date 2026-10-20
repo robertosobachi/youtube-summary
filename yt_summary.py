@@ -24,7 +24,7 @@ import urllib.request
 from pathlib import Path
 
 import anthropic
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import TranscriptsDisabled, YouTubeTranscriptApi
 
 MODEL = "claude-sonnet-5-5"
 # Thinking is always on for this model and counts towards max_tokens.
@@ -87,7 +87,10 @@ def lang(code: str) -> str:
 
 
 def transcript(vid: str) -> tuple[str, str]:
-    tracks = list(YouTubeTranscriptApi().list(vid))
+    try:
+        tracks = list(YouTubeTranscriptApi().list(vid))
+    except TranscriptsDisabled:
+        sys.exit("This video has no captions, nothing to summarise.")
     if not tracks:
         sys.exit("No transcript available for this video.")
     # Human captions first. Auto-generated tracks include machine dubs listed
