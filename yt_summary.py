@@ -20,9 +20,10 @@ ready to paste into any chat. A new summary also marks the video watched on
 YouTube, using Chrome's cookies; macOS asks for the keychain password each run.
 feed lists your YouTube Home recommendations (rec, default), Subscriptions
 (subs) or Watch Later (wl), N items (default 20), and summarises the ones you
-pick. Videos already summarised are left out. Up to two entries marked 🌟 are
-Claude's guess at what you'd want and the ones marked 👎 at what you wouldn't,
-based on what you summarised before and what you marked not interested with x.
+pick, or o opens the highlighted one in your browser. Videos already summarised
+are left out. Up to two entries marked 🌟 are Claude's guess at what you'd want
+and the ones marked 👎 at what you wouldn't, based on what you summarised before
+and what you marked not interested with x.
 --clear deletes the saved file for one video, or all of them. It keeps the
 videos marked not interested.
 """
@@ -36,9 +37,11 @@ import select
 import subprocess
 import sys
 import termios
+import time
 import tty
 import urllib.parse
 import urllib.request
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -66,9 +69,9 @@ PICK_HISTORY = 50
 REJECTED = OUT_DIR / "rejected.json"
 # Height in terminal rows of the thumbnail shown under the feed picker.
 PREVIEW_ROWS = 9
-# Thumbnail next to each feed entry: 16:9 over two rows of roughly 1:2 cells.
-ICON_ROWS, ICON_COLS = 2, 7
-ICON_PX = (128, 72)
+# Thumbnail next to each feed entry: 16:9 over three rows of roughly 1:2 cells.
+ICON_ROWS, ICON_COLS = 3, 11
+ICON_PX = (192, 108)
 # Column the icon starts at, after the selection mark and the number.
 ICON_AT = 8
 
@@ -198,6 +201,8 @@ def youtube(size: int | None = None):
         "cookiesfrombrowser": BROWSER,
         "extract_flat": "in_playlist",
         "playlistend": size,
+        # Feed entries only carry YouTube's "3 days ago"; this turns it into a timestamp.
+        "extractor_args": {"youtubetab": {"approximate_date": [""]}},
         "mark_watched": True,
         "quiet": True,
         "no_warnings": True,
@@ -334,9 +339,22 @@ def kitty_delete(image_id: int) -> str:
     return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"
 
 
+def age(ts: float | None) -> str:
+    """How long ago the video was posted, back in YouTube's own words. Rounded, as
+    "2 months ago" parsed into calendar months can come back as 59 days."""
+    if not ts:
+        return ""
+    days = (time.time() - ts) / 86400
+    for unit, size, start in (("year", 365.25, 360), ("month", 30.44, 28), ("week", 7, 7), ("day", 1, 1)):
+        if days >= start:
+            n = max(1, round(days / size))
+            return f"{n} {unit}{'s' if n > 1 else ''} ago"
+    return "today"
+
+
 def feed_item(n: int, e: dict, recs: set[str], skips: set[str], icon: bool = False) -> list[Text]:
-    """The entry's rows in the list: one, or with an icon, the title over the channel
-    with room on the left for the icon."""
+    """The entry's rows in the list: one, or with an icon, the channel over the title
+    over the age, with room on the left for the icon."""
     rec = e["id"] in recs
     skip = e["id"] in skips
     num = (f"{n:>3}. ", "dim")
@@ -344,11 +362,18 @@ def feed_item(n: int, e: dict, recs: set[str], skips: set[str], icon: bool = Fal
     mark = "🌟" if rec else "👎" if skip else "  "
     title = (e["title"], "bold magenta" if rec else "bold")
     channel = (f"[{e.get('channel') or e['uploader']}]", "cyan")
+    when = age(e.get("timestamp"))
     if icon:
         gap = " " * (ICON_COLS + 1)
-        rows = [Text.assemble(num, gap, mark, " ", title), Text.assemble(" " * 5, gap, "   ", channel)]
+        indent = " " * 5 + gap + "   "
+        # Always three rows, even with no date: the picker assumes every entry is as tall.
+        rows = [
+            Text.assemble(num, gap, "   ", channel),
+            Text.assemble(" " * 5, gap, mark, " ", title),
+            Text.assemble(indent, (when, "dim")),
+        ]
     else:
-        rows = [Text.assemble(num, mark, " ", title, "  ", channel)]
+        rows = [Text.assemble(num, mark, " ", title, "  ", channel, (f"  · {when}" if when else "", "dim"))]
     if skip:
         for row in rows:
             row.stylize("dim")
@@ -356,11 +381,15 @@ def feed_item(n: int, e: dict, recs: set[str], skips: set[str], icon: bool = Fal
 
 
 def pick(
-    items: list[list[Text]], posters: list[tuple[str, str] | None] | None = None, rejected: set[int] = frozenset()
+    items: list[list[Text]],
+    ids: list[str],
+    posters: list[tuple[str, str] | None] | None = None,
+    rejected: set[int] = frozenset(),
 ) -> tuple[list[int], set[int]]:
     """Arrow-key picker on stderr. With posters, each entry gets its icon and the
-    highlighted one a larger preview under the list. Returns the chosen indices, empty on
-    quit, and the ones marked not interested, starting from rejected."""
+    highlighted one a larger preview under the list. o opens the highlighted video, by
+    its id, in the browser. Returns the chosen indices, empty on quit, and the ones
+    marked not interested, starting from rejected."""
     err = Console(stderr=True)
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -372,7 +401,7 @@ def pick(
     size = max(1, min(len(items), (err.height - 2 - preview) // height))
     # One line even in a narrow window, or the redraw lands in the wrong place.
     hint = Text(
-        "↑↓ move  space select  x not interested  enter summarise  q quit",
+        "↑↓ move │ space select │ enter summarise │ o open │ x not interested │ q quit",
         style="dim",
         no_wrap=True,
         overflow="ellipsis",
@@ -427,6 +456,8 @@ def pick(
             elif key == b"x":
                 rejected ^= {cur}
                 chosen -= rejected
+            elif key == b"o":
+                webbrowser.open(f"https://www.youtube.com/watch?v={ids[cur]}")
             elif key in (b"\r", b"\n"):
                 return sorted(chosen) or [cur], rejected
             elif key in (b"\x1b", b"q"):
@@ -462,7 +493,7 @@ def feed(args: list[str]) -> None:
     items = [feed_item(n, e, recs, skips, icon=bool(posters)) for n, e in enumerate(entries, 1)]
     marked = {i for i, e in enumerate(entries) if e["id"] in rejected}
     if interactive:
-        chosen, marked = pick(items, posters, marked)
+        chosen, marked = pick(items, [e["id"] for e in entries], posters, marked)
     else:
         # Piped input: print the list and read numbers instead.
         out = Console()
