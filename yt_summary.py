@@ -21,10 +21,12 @@ YouTube, using Chrome's cookies; macOS asks for the keychain password each run.
 feed lists your YouTube Home recommendations (rec, default), Subscriptions
 (subs) or Watch Later (wl), N items (default 20), and summarises the ones you
 pick, or o opens the highlighted one in your browser. Videos already summarised
-are left out. Up to two entries marked 🌟 are Claude's guess at what you'd want
-and the ones marked 👎 at what you wouldn't, based on what you summarised before
-and what you marked not interested with x. A feed fetched in the last 30
-minutes is reused, Claude's marks included; --fresh fetches it again.
+are left out, and so are the ones you marked not interested with x, which on
+Home also tells YouTube you're not interested. Up to two entries marked 🌟 are
+Claude's guess at what you'd want and the ones marked 👎 at what you wouldn't,
+based on what you summarised before and what you marked with x. A feed fetched
+in the last 30 minutes is reused, Claude's marks included; --fresh fetches it
+again.
 --clear deletes the saved file for one video, or all of them. It keeps the
 videos marked not interested.
 """
@@ -72,8 +74,9 @@ REJECTED = OUT_DIR / "rejected.json"
 # yt-dlp fetch and the Haiku call: {name: {at, size, entries, recs, skips}}.
 FEED_CACHE = OUT_DIR / "feed.json"
 FEED_TTL = 30 * 60
-# The entry fields the feed uses; yt-dlp's entries carry far more.
-FEED_KEYS = ("id", "title", "channel", "uploader", "timestamp")
+# The entry fields the feed uses; yt-dlp's entries carry far more. nit is YouTube's
+# Not interested token, read from the raw feed since yt-dlp drops it.
+FEED_KEYS = ("id", "title", "channel", "uploader", "timestamp", "nit")
 # Height in terminal rows of the thumbnail shown under the feed picker.
 PREVIEW_ROWS = 9
 # Thumbnail next to each feed entry: 16:9 over three rows of roughly 1:2 cells.
@@ -222,13 +225,84 @@ def youtube(size: int | None = None):
 def feed_entries(ydl, name: str) -> list[dict]:
     import yt_dlp
 
+    # Keep the raw pages yt-dlp reads, for the Not interested tokens its entries drop.
+    # These are yt-dlp internals: if they move, x just stops reaching YouTube.
+    raw, hooked = [], {}
+    try:
+        from yt_dlp.extractor.youtube._base import YoutubeBaseInfoExtractor as yt
+
+        hooked = {n: getattr(yt, n) for n in ("extract_yt_initial_data", "_extract_response") if hasattr(yt, n)}
+    except ImportError:
+        pass
+
+    def capture(f):
+        def wrapped(self, *args, **kwargs):
+            r = f(self, *args, **kwargs)
+            raw.append(r)
+            return r
+
+        return wrapped
+
+    for n, f in hooked.items():
+        setattr(yt, n, capture(f))
     try:
         info = ydl.extract_info(FEEDS[name], download=False)
     except yt_dlp.utils.DownloadError:
         # yt-dlp has already printed the reason.
         sys.exit("Couldn't load the feed.")
+    finally:
+        for n, f in hooked.items():
+            setattr(yt, n, f)
+    tokens = not_interested_tokens(raw)
     # Private and deleted videos come back with no channel.
-    return [e for e in info.get("entries") or [] if e.get("channel") or e.get("uploader")]
+    entries = [e for e in info.get("entries") or [] if e.get("channel") or e.get("uploader")]
+    for e in entries:
+        e["nit"] = tokens.get(e["id"])
+    return entries
+
+
+def not_interested_tokens(o, vid: str | None = None, label: str | None = None, out: dict | None = None) -> dict[str, str]:
+    """{video id: feedback token} for each Not interested item in YouTube's raw feed JSON.
+    A token belongs to the nearest video id above it and the nearest menu label; yt-dlp
+    asks YouTube for English, so the label text is stable."""
+    out = {} if out is None else out
+    if isinstance(o, dict):
+        v = o.get("contentId") or o.get("videoId")
+        vid = v if isinstance(v, str) else vid
+        t = o.get("title") or o.get("text")
+        if isinstance(t, dict):
+            t = t.get("content") or "".join(r.get("text", "") for r in t.get("runs", []))
+        label = t if isinstance(t, str) else label
+        token = (o.get("feedbackEndpoint") or {}).get("feedbackToken")
+        if token and vid and label == "Not interested":
+            out.setdefault(vid, token)
+        for v in o.values():
+            not_interested_tokens(v, vid, label, out)
+    elif isinstance(o, list):
+        for v in o:
+            not_interested_tokens(v, vid, label, out)
+    return out
+
+
+def not_interested(ydl, tokens: list[str]) -> None:
+    """Tell YouTube you're not interested, as its menu on youtube.com does, so Home drops
+    the video everywhere and recommends fewer like it."""
+    ie = ydl.get_info_extractor("YoutubeTab")
+    failed = 0
+    for token in tokens:
+        try:
+            res = ie._extract_response(
+                item_id="feed",
+                query={"feedbackTokens": [token], "isFeedbackTokenUnencrypted": False, "shouldMerge": False},
+                note="Sending Not interested",
+                headers=ie.generate_api_headers(),
+                ep="feedback",
+            )
+            failed += not all(r.get("isProcessed") for r in res.get("feedbackResponses") or [{}])
+        except Exception:
+            failed += 1
+    if failed:
+        Console(stderr=True).print(f"Couldn't tell YouTube about {failed} of the videos marked not interested.", style="dim")
 
 
 def mark_watched(ydl, vid: str) -> None:
@@ -294,11 +368,10 @@ def save_feed(name: str, size: int, entries: list[dict], recs: set[str], skips: 
 def recommend(entries: list[dict], rejected: dict[str, str]) -> tuple[set[str], set[str]]:
     """Haiku's guess at the fresh entries you'd want and the ones you'd skip, as ids."""
     history = history_titles()
-    fresh = [e for e in entries if e["id"] not in rejected]
     # With no history the pick would be a guess, so don't spend a call on it.
-    if not (history or rejected) or not fresh:
+    if not (history or rejected):
         return set(), set()
-    listed = "\n".join(f"{n}. {e['title']} [{e.get('channel') or e['uploader']}]" for n, e in enumerate(fresh, 1))
+    listed = "\n".join(f"{n}. {e['title']} [{e.get('channel') or e['uploader']}]" for n, e in enumerate(entries, 1))
     passed = list(rejected.values())[::-1][:PICK_HISTORY]
     prompt = (
         "Videos I chose to summarise before, newest first:\n"
@@ -326,11 +399,11 @@ def recommend(entries: list[dict], rejected: dict[str, str]) -> tuple[set[str], 
     def numbers(label: str) -> list[int]:
         # \W* lets through Markdown such as **Want:**.
         m = re.search(rf"{label}\W*(.*)", text, re.IGNORECASE)
-        return [int(n) for n in re.findall(r"\d+", m.group(1)) if 1 <= int(n) <= len(fresh)] if m else []
+        return [int(n) for n in re.findall(r"\d+", m.group(1)) if 1 <= int(n) <= len(entries)] if m else []
 
     want = numbers("Want")[:2]
     skip = [n for n in numbers("Skip") if n not in want]
-    return {fresh[n - 1]["id"] for n in want}, {fresh[n - 1]["id"] for n in skip}
+    return {entries[n - 1]["id"] for n in want}, {entries[n - 1]["id"] for n in skip}
 
 
 def can_draw_images() -> bool:
@@ -421,17 +494,15 @@ def pick(
     items: list[list[Text]],
     ids: list[str],
     posters: list[tuple[str, str] | None] | None = None,
-    rejected: set[int] = frozenset(),
 ) -> tuple[list[int], set[int]]:
     """Arrow-key picker on stderr. With posters, each entry gets its icon and the
     highlighted one a larger preview under the list. o opens the highlighted video, by
     its id, in the browser. Returns the chosen indices, empty on quit, and the ones
-    marked not interested, starting from rejected."""
+    marked not interested."""
     err = Console(stderr=True)
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
-    cur, top, drawn, chosen, shown = 0, 0, 0, set(), []
-    rejected = set(rejected)
+    cur, top, drawn, chosen, rejected, shown = 0, 0, 0, set(), set(), []
     height = len(items[0])
     preview = PREVIEW_ROWS if posters else 0
     # Leave room for the hint, the line the cursor ends on and the preview.
@@ -513,15 +584,16 @@ def pick(
 def feed(args: list[str]) -> None:
     name, size, fresh = feed_args(args)
     cached = None if fresh else load_feed(name, size)
-    # Summarised videos are hidden, so fetch twice as many to still fill the list.
-    # Cookies load on first use, so a cached feed doesn't ask for the keychain unless you summarise.
+    # Summarised and rejected videos are hidden, so fetch twice as many to still fill the list.
+    # Cookies load on first use, so a cached feed doesn't ask for the keychain unless you
+    # summarise or press x.
     ydl = youtube(size * 2)
     fetched = cached["entries"] if cached else feed_entries(ydl, name)
-    entries = [e for e in fetched if not (OUT_DIR / f"{e['id']}.md").exists()][:size]
-    if not entries:
-        sys.exit("Nothing in the feed you haven't summarised.")
-    interactive = sys.stdin.isatty() and sys.stderr.isatty()
     rejected = load_rejected()
+    entries = [e for e in fetched if e["id"] not in rejected and not (OUT_DIR / f"{e['id']}.md").exists()][:size]
+    if not entries:
+        sys.exit("Nothing in the feed you haven't summarised or marked not interested.")
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
     if cached:
         mins = int((time.time() - cached["at"]) // 60)
         Console(stderr=True).print(f"Feed from {mins} min ago, --fresh to reload.", style="dim")
@@ -538,9 +610,9 @@ def feed(args: list[str]) -> None:
     if not any(posters or []) or Console(stderr=True).height - 2 - PREVIEW_ROWS < 3 * ICON_ROWS:
         posters = None
     items = [feed_item(n, e, recs, skips, icon=bool(posters)) for n, e in enumerate(entries, 1)]
-    marked = {i for i, e in enumerate(entries) if e["id"] in rejected}
+    marked = set()
     if interactive:
-        chosen, marked = pick(items, [e["id"] for e in entries], posters, marked)
+        chosen, marked = pick(items, [e["id"] for e in entries], posters)
     else:
         # Piped input: print the list and read numbers instead.
         out = Console()
@@ -553,15 +625,13 @@ def feed(args: list[str]) -> None:
             return
         chosen = [int(p) - 1 for p in picked if p.isdigit() and 1 <= int(p) <= len(entries)]
     # Only your own marks count: saving Haiku's skips would feed its guesses back to it.
-    # Picking a video takes it off the list.
-    before = dict(rejected)
-    for i, e in enumerate(entries):
-        if i in marked and i not in chosen:
-            rejected.setdefault(e["id"], f"{e['title']} [{e.get('channel') or e['uploader']}]")
-        else:
-            rejected.pop(e["id"], None)
-    if rejected != before:
+    # Sent on the way out rather than on x, so an x undone before quitting never reaches YouTube.
+    nope = [entries[i] for i in sorted(marked) if i not in chosen]
+    if nope:
+        for e in nope:
+            rejected[e["id"]] = f"{e['title']} [{e.get('channel') or e['uploader']}]"
         save_rejected(rejected)
+        not_interested(ydl, [e["nit"] for e in nope if e.get("nit")])
     picks = [entries[i] for i in chosen]
     err = Console(stderr=True)
     for e in picks:
