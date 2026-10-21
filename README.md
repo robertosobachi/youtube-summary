@@ -31,6 +31,7 @@ To clear the cache:
     yts feed subs       # Subscriptions
     yts feed wl         # Watch Later
     yts feed -n 50      # more items (default 20), with any feed
+    yts feed --fresh    # fetch again instead of reusing the last 30 minutes' fetch
 
 Lists the feed to pick from: ↑↓ (or `j`/`k`) to move, Space to select several, `x` to mark one not interested (again to undo), Enter to summarise the selected ones (or the highlighted one if none are selected), `o` to open the highlighted one in your default browser instead (the list stays open), `q` or Esc to quit. Each entry shows how long ago it was posted, approximate because YouTube's feeds only say "3 days ago" or "2 months ago". In terminals that support the Kitty graphics protocol (Warp, Ghostty, kitty) each entry gets a thumbnail beside three lines, channel, title and age, and the highlighted one a larger thumbnail under the list; elsewhere, or in a window under 20 rows, it's one line per entry with no thumbnails. With piped input it falls back to typing numbers (`1 4 7`). Videos already summarised are left out, and more are fetched to keep the list at N. Private and deleted videos are hidden.
 

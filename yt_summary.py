@@ -10,7 +10,7 @@
 # ]
 # ///
 """Usage: yts <youtube-url-or-id>
-       yts feed [rec|subs|wl] [-n N]
+       yts feed [rec|subs|wl] [-n N] [--fresh]
        yts --clear [youtube-url-or-id]
 
 Needs ANTHROPIC_API_KEY in the environment.
@@ -23,7 +23,8 @@ feed lists your YouTube Home recommendations (rec, default), Subscriptions
 pick, or o opens the highlighted one in your browser. Videos already summarised
 are left out. Up to two entries marked 🌟 are Claude's guess at what you'd want
 and the ones marked 👎 at what you wouldn't, based on what you summarised before
-and what you marked not interested with x.
+and what you marked not interested with x. A feed fetched in the last 30
+minutes is reused, Claude's marks included; --fresh fetches it again.
 --clear deletes the saved file for one video, or all of them. It keeps the
 videos marked not interested.
 """
@@ -67,6 +68,12 @@ PICK_MODEL = "claude-haiku-5-5"
 PICK_HISTORY = 50
 # Feed videos marked not interested with x, as {id: "title [channel]"}, oldest first.
 REJECTED = OUT_DIR / "rejected.json"
+# Last fetch of each feed with Haiku's marks, reused for FEED_TTL seconds to save the
+# yt-dlp fetch and the Haiku call: {name: {at, size, entries, recs, skips}}.
+FEED_CACHE = OUT_DIR / "feed.json"
+FEED_TTL = 30 * 60
+# The entry fields the feed uses; yt-dlp's entries carry far more.
+FEED_KEYS = ("id", "title", "channel", "uploader", "timestamp")
 # Height in terminal rows of the thumbnail shown under the feed picker.
 PREVIEW_ROWS = 9
 # Thumbnail next to each feed entry: 16:9 over three rows of roughly 1:2 cells.
@@ -179,16 +186,18 @@ def clear(arg: str | None) -> None:
         print(f"Not cached: {vid}", file=sys.stderr)
 
 
-def feed_args(args: list[str]) -> tuple[str, int]:
-    name, size = "rec", FEED_SIZE
+def feed_args(args: list[str]) -> tuple[str, int, bool]:
+    name, size, fresh = "rec", FEED_SIZE, False
     while args:
         if args[0] in FEEDS:
             name, args = args[0], args[1:]
         elif args[0] == "-n" and len(args) > 1 and args[1].isdigit() and int(args[1]) > 0:
             size, args = int(args[1]), args[2:]
+        elif args[0] == "--fresh":
+            fresh, args = True, args[1:]
         else:
             sys.exit(__doc__)
-    return name, size
+    return name, size, fresh
 
 
 def youtube(size: int | None = None):
@@ -252,6 +261,34 @@ def load_rejected() -> dict[str, str]:
 def save_rejected(rejected: dict[str, str]) -> None:
     OUT_DIR.mkdir(exist_ok=True)
     REJECTED.write_text(json.dumps(rejected, indent=1, ensure_ascii=False) + "\n")
+
+
+def load_feeds() -> dict[str, dict]:
+    try:
+        return json.loads(FEED_CACHE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def load_feed(name: str, size: int) -> dict | None:
+    """The cached fetch of this feed, if recent and long enough for size."""
+    c = load_feeds().get(name)
+    if not c or time.time() - c["at"] >= FEED_TTL or c["size"] < size:
+        return None
+    return c
+
+
+def save_feed(name: str, size: int, entries: list[dict], recs: set[str], skips: set[str]) -> None:
+    feeds = load_feeds()
+    feeds[name] = {
+        "at": time.time(),
+        "size": size,
+        "entries": [{k: e.get(k) for k in FEED_KEYS} for e in entries],
+        "recs": sorted(recs),
+        "skips": sorted(skips),
+    }
+    OUT_DIR.mkdir(exist_ok=True)
+    FEED_CACHE.write_text(json.dumps(feeds, ensure_ascii=False) + "\n")
 
 
 def recommend(entries: list[dict], rejected: dict[str, str]) -> tuple[set[str], set[str]]:
@@ -474,18 +511,28 @@ def pick(
 
 
 def feed(args: list[str]) -> None:
-    name, size = feed_args(args)
+    name, size, fresh = feed_args(args)
+    cached = None if fresh else load_feed(name, size)
     # Summarised videos are hidden, so fetch twice as many to still fill the list.
+    # Cookies load on first use, so a cached feed doesn't ask for the keychain unless you summarise.
     ydl = youtube(size * 2)
-    entries = [e for e in feed_entries(ydl, name) if not (OUT_DIR / f"{e['id']}.md").exists()][:size]
+    fetched = cached["entries"] if cached else feed_entries(ydl, name)
+    entries = [e for e in fetched if not (OUT_DIR / f"{e['id']}.md").exists()][:size]
     if not entries:
         sys.exit("Nothing in the feed you haven't summarised.")
     interactive = sys.stdin.isatty() and sys.stderr.isatty()
     rejected = load_rejected()
+    if cached:
+        mins = int((time.time() - cached["at"]) // 60)
+        Console(stderr=True).print(f"Feed from {mins} min ago, --fresh to reload.", style="dim")
     with Console(stderr=True).status("Picking..."), ThreadPoolExecutor(8) as pool:
         # Thumbnails load while Haiku picks, so moving through the list never waits on the network.
         thumbs = pool.map(thumbnail, [e["id"] for e in entries]) if interactive and can_draw_images() else None
-        recs, skips = recommend(entries, rejected)
+        if cached:
+            recs, skips = set(cached["recs"]), set(cached["skips"])
+        else:
+            recs, skips = recommend(entries, rejected)
+            save_feed(name, size, fetched, recs, skips)
         posters = list(thumbs) if thumbs else None
     # Icons and preview need room for at least three entries.
     if not any(posters or []) or Console(stderr=True).height - 2 - PREVIEW_ROWS < 3 * ICON_ROWS:
