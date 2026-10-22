@@ -8,7 +8,13 @@
 #   "yt-dlp",
 #   "pillow",
 # ]
+# [tool.uv]
+# exclude-newer = "2026-10-15T00:00:00Z"
 # ///
+# exclude-newer installs only releases up to that date, dependencies' dependencies
+# included, so a compromised new version can't reach the decrypted browser cookies.
+# Move it forward on purpose, e.g. for a yt-dlp fix. Not a lockfile: uv ignores
+# yt_summary.py.lock when the script runs through the yts symlink.
 """Usage: yts <youtube-url-or-id>
        yts feed [rec|subs|wl] [-n N] [--fresh]
        yts --clear [youtube-url-or-id]

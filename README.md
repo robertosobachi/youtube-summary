@@ -13,7 +13,9 @@ Summarise a YouTube video from its transcript with Claude, or triage your YouTub
 - For the feed and the watched mark: a browser logged in to YouTube (see Feed).
 
 > [!WARNING]
-> The feed, the watched mark and Not interested use YouTube's internal API with your logged-in browser cookies, not the official API. That's against YouTube's terms of service, and you use it at your own risk to your Google account. Summarising a single video needs no login; if marking it watched fails, the summary still prints.
+> The feed, the watched mark and Not interested use YouTube's internal API with your logged-in browser cookies. That's against YouTube's terms of service, and you use it at your own risk to your Google account. The official Data API can't replace it: an API key only reads public data, and even with a login it has no Home feed, returns Watch Later and watch history empty, and has no way to mark a video watched or not interested. Summarising a single video needs no login; if marking it watched fails, the summary still prints.
+>
+> Reading the cookies decrypts every cookie the browser holds, not only YouTube's, so for that run your bank, email and other sessions are readable by the script and its dependencies. yt-dlp only sends YouTube's to YouTube, but a compromised dependency could send any of them anywhere. To limit that, the script installs only dependency releases up to the `exclude-newer` date in its header. For full isolation, set `YTS_BROWSER` to a browser you use only for YouTube.
 
 ## Setup
 
@@ -59,7 +61,7 @@ Up to two entries are marked 🌟 with a magenta title: Claude Haiku's guess at 
 
 Videos marked not interested are saved to `transcripts/rejected.json` and left out of every feed from then on. Quitting the list also sends YouTube the same "Not interested" as its menu on youtube.com, so the video leaves Home on every device and YouTube recommends fewer like it. That needs the menu item, which Home has; on a feed without it the video is only hidden in `yts`. Sending uses YouTube's internal API: if it fails, you get a dim notice and the video stays hidden here anyway. Only your own `x` presses are saved, never Haiku's 👎, so it doesn't learn from its own guesses. `yts --clear` keeps this file; delete an entry by hand to see that video again.
 
-It reads your YouTube login from your browser's cookies via yt-dlp (`YTS_BROWSER`, Chrome by default). With Chrome, macOS asks for the "Chrome Safe Storage" keychain password on every run. Click Allow, not Always Allow: that would let any process on the machine decrypt every Chrome cookie without asking. The feeds use YouTube's internal pages, not the official API, and can break when YouTube changes them; uv picks up a newer yt-dlp once it has a fix.
+It reads your YouTube login from your browser's cookies via yt-dlp (`YTS_BROWSER`, Chrome by default). With Chrome, macOS asks for the "Chrome Safe Storage" keychain password on every run. Click Allow, not Always Allow: that would let any process on the machine decrypt every Chrome cookie without asking. The feeds use YouTube's internal pages, not the official API, and can break when YouTube changes them. When yt-dlp has a fix, move the `exclude-newer` date in the script's header past its release.
 
 The follow-up prompt below is copied only when you pick a single video.
 
