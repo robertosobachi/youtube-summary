@@ -1,24 +1,44 @@
 # yt-summary
 
-Fetches a YouTube video's transcript and summarises it with the Claude API, in Italian when the chosen transcript is Italian and in English otherwise.
+Summarise a YouTube video from its transcript with Claude, or triage your YouTube Home feed in the terminal: pick what to summarise, mark the rest not interested, and let Claude flag what you'd probably want or skip.
+
+<!-- Recording of `yts feed` with thumbnails goes here: ![yts feed](docs/feed.gif) -->
+
+## Requirements
+
+- macOS. Linux works too, except the follow-up prompt isn't copied to the clipboard. Not tested on Windows.
+- [uv](https://docs.astral.sh/uv/) (`brew install uv`). Dependencies install on first run.
+- Your own Anthropic API key in `ANTHROPIC_API_KEY`. Never commit it. Each new summary is one Claude Sonnet call and each fresh feed one Claude Haiku call, billed to that key; cost depends on transcript length.
+- A residential connection. YouTube blocks transcript requests from cloud and VPN IPs.
+- For the feed and the watched mark: a browser logged in to YouTube (see Feed).
+
+> [!WARNING]
+> The feed, the watched mark and Not interested use YouTube's internal API with your logged-in browser cookies, not the official API. That's against YouTube's terms of service, and you use it at your own risk to your Google account. Summarising a single video needs no login; if marking it watched fails, the summary still prints.
 
 ## Setup
 
-- [uv](https://docs.astral.sh/uv/) (`brew install uv`). Dependencies install on first run.
-- `ANTHROPIC_API_KEY` set in your shell environment. Never commit it.
-- Link it as `yts` somewhere on your PATH, once, from the repo directory:
+- Clone the repo and link the script as `yts` somewhere on your PATH, once, from the repo directory:
 
+      git clone https://github.com/robertosobachi/youtube-summary.git
+      cd youtube-summary
       ln -s "$PWD/yt_summary.py" ~/.local/bin/yts
 
 - Optional, zsh: to pass `watch?v=` URLs without quotes, add this to `~/.zshrc`. URLs with `&` (e.g. `&t=30s`) still need quotes.
 
       alias yts='noglob yts'
 
+### Configuration
+
+Optional environment variables:
+
+- `YTS_BROWSER`: the browser to read YouTube cookies from, anything yt-dlp's `--cookies-from-browser` takes (`chrome`, `firefox`, `safari`, `brave`, `edge`...). Default `chrome`.
+- `YTS_LANGS`: preferred transcript languages, in order, as codes, e.g. `en,it`. Default `en`. A transcript in one of them is summarised in that language; any other is summarised in English.
+
 ## Usage
 
     yts "https://youtu.be/VIDEO_ID"
 
-Prints the summary. Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call. A new summary also adds the video to your YouTube watch history, so YouTube recommends it less; this reads your login from Chrome's cookies, so macOS asks for the keychain password (see Feed).
+Prints the summary. Summary and transcript are saved to `transcripts/<id>.md` next to the script (gitignored). If that file already exists, the saved summary is reused with no transcript fetch or API call. A new summary also adds the video to your YouTube watch history, so YouTube recommends it less; this reads your login from your browser's cookies, so with Chrome macOS asks for the keychain password (see Feed).
 
 To clear the cache:
 
@@ -39,7 +59,7 @@ Up to two entries are marked 🌟 with a magenta title: Claude Haiku's guess at 
 
 Videos marked not interested are saved to `transcripts/rejected.json` and left out of every feed from then on. Quitting the list also sends YouTube the same "Not interested" as its menu on youtube.com, so the video leaves Home on every device and YouTube recommends fewer like it. That needs the menu item, which Home has; on a feed without it the video is only hidden in `yts`. Sending uses YouTube's internal API: if it fails, you get a dim notice and the video stays hidden here anyway. Only your own `x` presses are saved, never Haiku's 👎, so it doesn't learn from its own guesses. `yts --clear` keeps this file; delete an entry by hand to see that video again.
 
-It reads your YouTube login from Chrome's cookies via yt-dlp, so macOS asks for the "Chrome Safe Storage" keychain password on every run. Click Allow, not Always Allow: that would let any process on the machine decrypt every Chrome cookie without asking. The feeds use YouTube's internal pages, not the official API, and can break when YouTube changes them; uv picks up a newer yt-dlp once it has a fix.
+It reads your YouTube login from your browser's cookies via yt-dlp (`YTS_BROWSER`, Chrome by default). With Chrome, macOS asks for the "Chrome Safe Storage" keychain password on every run. Click Allow, not Always Allow: that would let any process on the machine decrypt every Chrome cookie without asking. The feeds use YouTube's internal pages, not the official API, and can break when YouTube changes them; uv picks up a newer yt-dlp once it has a fix.
 
 The follow-up prompt below is copied only when you pick a single video.
 
@@ -73,6 +93,9 @@ Invented example. In a terminal the Markdown is rendered with colour.
 
 ## Notes
 
-- Human captions are preferred, auto-generated ones used as fallback. Within each, English comes first, then Italian.
-- Auto-generated tracks can include machine dubs, so an Italian video with only auto captions is summarised in English.
-- YouTube blocks transcript requests from cloud and VPN IPs. Run it from a residential connection.
+- Human captions are preferred, auto-generated ones used as fallback. Within each, the languages in `YTS_LANGS` come first, in order.
+- Auto-generated tracks can include machine dubs, so with `YTS_LANGS=en,it` an Italian video with only auto captions is summarised from the English dub, in English.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE).
