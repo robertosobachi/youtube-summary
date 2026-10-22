@@ -29,6 +29,9 @@ in the last 30 minutes is reused, Claude's marks included; --fresh fetches it
 again.
 --clear deletes the saved file for one video, or all of them. It keeps the
 videos marked not interested.
+YTS_BROWSER picks the browser to read YouTube cookies from (default chrome).
+YTS_LANGS lists preferred transcript languages, e.g. en,it (default en); a
+transcript in one of them is summarised in its language, any other in English.
 """
 
 import base64
@@ -37,6 +40,7 @@ import json
 import os
 import re
 import select
+import shutil
 import subprocess
 import sys
 import termios
@@ -63,7 +67,9 @@ OUT_DIR = Path(__file__).resolve().parent / "transcripts"
 SUMMARY = "## Summary\n\n"
 TRANSCRIPT = "\n\n## Transcript\n\n"
 FEEDS = {"rec": ":ytrec", "subs": ":ytsubs", "wl": ":ytwatchlater"}
-BROWSER = ("chrome",)
+BROWSER = (os.environ.get("YTS_BROWSER", "chrome"),)
+# Transcript languages to prefer, in order, as codes such as en or it.
+LANGS = os.environ.get("YTS_LANGS", "en").split(",")
 FEED_SIZE = 20
 # Cheap model that highlights feed entries resembling what was summarised before.
 PICK_MODEL = "claude-haiku-5-5"
@@ -144,10 +150,12 @@ def transcript(vid: str) -> tuple[str, str]:
     if not tracks:
         sys.exit("No transcript available for this video.")
     # Human captions first. Auto-generated tracks include machine dubs listed
-    # alphabetically, so the original can't be told apart: prefer English, then Italian.
-    track = min(tracks, key=lambda t: (t.is_generated, {"en": 0, "it": 1}.get(lang(t.language_code), 2)))
+    # alphabetically, so the original can't be told apart: prefer LANGS, in order.
+    rank = {code.strip().lower(): n for n, code in enumerate(LANGS)}
+    track = min(tracks, key=lambda t: (t.is_generated, rank.get(lang(t.language_code), len(rank))))
     text = " ".join(s.text for s in track.fetch()).replace("\n", " ")
-    return text, "Italian" if lang(track.language_code) == "it" else "English"
+    # Names come back in English, e.g. "Italian (auto-generated)", as the library asks for en-US.
+    return text, track.language.split(" (")[0] if lang(track.language_code) in rank else "English"
 
 
 def summarise(vid: str, path: Path) -> str:
@@ -661,7 +669,8 @@ def show(vid: str, copy: bool = True, ydl=None) -> None:
     if not cached:
         with Console(stderr=True).status("Marking watched on YouTube..."):
             mark_watched(ydl or youtube(), vid)
-    if not copy:
+    # pbcopy is macOS only; elsewhere the summary is printed and saved, just not copied.
+    if not copy or not shutil.which("pbcopy"):
         return
     # Self-contained so it can be pasted into any chat, not only one with file access.
     followup = "Below are the summary and transcript of a YouTube video. Answer my questions about it.\n\n" + path.read_text()
